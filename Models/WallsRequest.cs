@@ -21,5 +21,7 @@ public class CreateWallsExchangeRequest
     public string Name { get; set; } = string.Empty;
     // Unit string reported by the viewer model (e.g. "ft", "m", "mm").
     public string Units { get; set; } = "ft";
+    // Wall color as "#rrggbb".
+    public string Color { get; set; } = "#c8c8c8";
     public List<WallDto> Walls { get; set; } = new();
 }

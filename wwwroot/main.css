@@ -99,7 +99,7 @@ body, html {
 
 #walls-status {
     min-height: 1.2em;
-    word-break: break-all;
+    overflow-wrap: anywhere;
 }
 
 #walls-status.error {

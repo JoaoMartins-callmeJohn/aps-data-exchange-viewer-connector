@@ -15,7 +15,7 @@ The hubs/projects/folders browsing experience is based on
   - `Controllers/AuthController.cs`: 3-legged OAuth, with tokens kept in cookies (same as the hubs browser).
   - `Controllers/HubsController.cs`: hubs, projects, folders, items and versions through Data Management.
   - `Controllers/ExchangesController.cs`: `POST /api/exchanges` takes the drawn walls and the target hub, project and folder.
-  - `Services/DataExchangeService.cs`: creates the exchange with `CreateExchangeAsync(ExchangeCreateRequestACC)`. It builds an `ElementDataModel` with one element per wall: category *Walls*, family *Basic Wall*, a type, a box mesh, and Length/Height/Thickness parameters. Then it calls `SyncExchangeDataAsync`.
+  - `Services/DataExchangeService.cs`: creates the exchange with `CreateExchangeAsync(ExchangeCreateRequestACC)`. It builds an `ElementDataModel` with one element per wall: category *Walls*, family *Basic Wall*, a type, an opaque box mesh in the chosen color, and Length/Width/Height/Area/Volume parameters (in the model's units, recorded in a Units parameter) plus a Color parameter. Then it calls `SyncExchangeDataAsync`.
   - `Services/WebSessionAuth.cs`: an `IAuth` implementation that hands the web session's access token to the SDK. The SDK's default auth would open a desktop browser instead.
 - **Client (vanilla JS, `wwwroot/`)**
   - `sidebar.js`: InspireTree browser. Node ids carry the parent folder of each item.
@@ -47,8 +47,8 @@ dotnet run
 Open http://localhost:8080, log in, then:
 
 1. Expand a hub → project → folder → file and click a **version** to load it.
-2. Set the wall **Height** and **Thickness**. They are in the model's units, and the defaults are 3 m and 0.2 m converted to those units.
-3. Click **Draw walls**, then click two points on the model to create a wall. Walls chain from one to the next; press Esc or right-click to start a new chain. **Undo** and **Clear** remove walls.
+2. Set the wall **Height**, **Thickness** and **Color**. Height and thickness are in the model's units, and the defaults are 3 m and 0.2 m converted to those units. The color applies to every wall, both in the viewer and in the exchange.
+3. Click **Draw walls**, then click two points on the model to create a wall. Points snap to vertices, midpoints, edges and faces using the viewer's `Autodesk.Snapping` extension (see [Snappy viewer tools](https://aps.autodesk.com/blog/snappy-viewer-tools)). Walls chain from one to the next; press Esc or right-click to start a new chain. **Undo** and **Clear** remove walls.
 4. Enter an exchange name and click **Submit as new exchange**. The exchange appears in the same folder as the input file.
 
 SDK logs and per-user SDK storage are written to `%LOCALAPPDATA%\APS-DX-Walls`.

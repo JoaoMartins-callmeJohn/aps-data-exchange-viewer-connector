@@ -22,6 +22,7 @@ try {
             };
         }
         const viewer = await initViewer(document.getElementById('preview'));
+        await viewer.loadExtension('Autodesk.Snapping');
         const wallTool = new WallTool(viewer);
         const panel = initWallsPanel(wallTool);
         initTree('#tree', async (context) => {
@@ -51,6 +52,7 @@ function initWallsPanel(wallTool) {
     const status = document.getElementById('walls-status');
     const heightInput = document.getElementById('wall-height');
     const thicknessInput = document.getElementById('wall-thickness');
+    const colorInput = document.getElementById('wall-color');
     const drawButton = document.getElementById('draw-walls');
     const undoButton = document.getElementById('undo-wall');
     const clearButton = document.getElementById('clear-walls');
@@ -84,6 +86,7 @@ function initWallsPanel(wallTool) {
 
     heightInput.onchange = syncDimensions;
     thicknessInput.onchange = syncDimensions;
+    colorInput.oninput = () => wallTool.setColor(colorInput.value);
     drawButton.onclick = () => {
         syncDimensions();
         if (wallTool.isDrawing) wallTool.deactivateDrawing(); else wallTool.activateDrawing();
@@ -105,6 +108,7 @@ function initWallsPanel(wallTool) {
                     folderId: context.folderId,
                     name: nameInput.value,
                     units,
+                    color: wallTool.color,
                     walls: wallTool.getWalls()
                 })
             });
@@ -112,7 +116,10 @@ function initWallsPanel(wallTool) {
             if (!resp.ok) {
                 throw new Error(result.message || `Request failed with status ${resp.status}`);
             }
-            setStatus(`Exchange "${result.name}" created in the input file's folder (exchange id: ${result.exchangeId}).`);
+            const saved = (result.savedElements || [])
+                .map(e => `${e.name}: ${Object.entries(e.parameters).map(([k, v]) => `${k}=${v}`).join(', ') || 'no properties'}`)
+                .join('\n');
+            setStatus(`Exchange "${result.name}" created in the input file's folder (exchange id: ${result.exchangeId}).\nSaved:\n${saved}`);
         } catch (err) {
             setStatus(`Could not create the exchange: ${err.message}`, true);
             console.error(err);
@@ -132,6 +139,7 @@ function initWallsPanel(wallTool) {
             for (const label of panel.querySelectorAll('.unit')) label.innerText = units;
             nameInput.value = `Walls ${new Date().toISOString().slice(0, 19).replace('T', ' ').replace(/:/g, '-')}`;
             syncDimensions();
+            wallTool.setColor(colorInput.value);
             setStatus('');
             panel.classList.remove('disabled');
             wallTool.onChange();

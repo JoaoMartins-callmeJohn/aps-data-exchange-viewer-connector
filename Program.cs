@@ -19,6 +19,10 @@ if (app.Environment.IsDevelopment())
     app.UseDeveloperExceptionPage();
 }
 app.UseDefaultFiles();
-app.UseStaticFiles();
+// Always revalidate the client scripts so changes are picked up without a hard refresh.
+app.UseStaticFiles(new StaticFileOptions
+{
+    OnPrepareResponse = ctx => ctx.Context.Response.Headers.CacheControl = "no-cache"
+});
 app.MapControllers();
 app.Run();

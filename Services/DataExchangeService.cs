@@ -12,9 +12,11 @@ using Autodesk.DataExchange.Models;
 using Autodesk.DataExchange.SchemaObjects.Units;
 using Autodesk.GeometryUtilities.MeshAPI;
 using Autodesk.Parameters;
+using Color = Autodesk.GeometryUtilities.PrimitivesAPI.Color;
 using Mesh = Autodesk.GeometryUtilities.MeshAPI.Mesh;
 
-public record WallsExchangeResult(string Name, string ExchangeId, string CollectionId, string HubId, string FileUrn);
+public record SavedElement(string Name, Dictionary<string, string> Parameters);
+public record WallsExchangeResult(string Name, string ExchangeId, string CollectionId, string HubId, string FileUrn, List<SavedElement> SavedElements);
 
 /// <summary>
 /// Creates Data Exchanges containing walls drawn in the viewer.
@@ -61,7 +63,10 @@ public class DataExchangeService
         var unit = ToUnit(request.Units);
         var units = new Units(unit, unit, UnitFactory.Radian);
         var unitLabel = string.IsNullOrEmpty(request.Units) ? "ft" : request.Units;
-        var style = new RenderStyle("Wall", new RGBA(200, 200, 200, 255), 0.0);
+        var (r, g, b) = ParseColor(request.Color);
+        // Fully opaque: alpha 255 on the color and transparency 0 on the style.
+        var style = new RenderStyle($"Wall {request.Color}", new RGBA(r, g, b, 255), 0.0);
+        var meshColor = new Color(r, g, b, 255);
 
         IElementDataModel model = ElementDataModel.Create(client);
         for (var i = 0; i < request.Walls.Count; i++)
@@ -73,19 +78,44 @@ public class DataExchangeService
             var family = model.Classify(element, ClassificationSystem.Family, "Basic Wall", parent: category);
             model.SetType(element, model.DefineType(system: "Type", name: $"Generic - {wall.Thickness:0.###} {unitLabel}", parent: family));
 
-            var geometry = ElementDataModel.CreateMeshGeometry(BuildWallMesh(wall), "Wall", units, sourceId);
+            var mesh = BuildWallMesh(wall);
+            // MeshColor is null by default; set it (and each face color) so the chosen color is what consumers render.
+            mesh.MeshColor = meshColor;
+            foreach (var face in mesh.Faces) face.FaceColor = meshColor;
+            var geometry = ElementDataModel.CreateMeshGeometry(mesh, "Wall", units, sourceId);
             geometry.RenderStyle = style;
             model.SetElementGeometry(element, new List<IElementGeometry> { geometry });
 
-            await AddParameter(element, "Length", WallLength(wall));
-            await AddParameter(element, "Height", wall.Height);
-            await AddParameter(element, "Thickness", wall.Thickness);
+            // Custom instance parameters, as in the official aps-dataexchange-console sample
+            // (ParameterSampleHelper.CreateCustomParameter). Values are in the source model's units.
+            var length = WallLength(wall);
+            var dimensions = Group.Dimensions.DisplayName();
+            var general = Group.General.DisplayName();
+            await AddParameter(element, "Length", length, dimensions);
+            await AddParameter(element, "Width", wall.Thickness, dimensions);
+            await AddParameter(element, "Height", wall.Height, dimensions);
+            await AddParameter(element, "Area", length * wall.Height, dimensions);
+            await AddParameter(element, "Volume", length * wall.Height * wall.Thickness, dimensions);
+            await AddParameter(element, "Units", unitLabel, general);
+            await AddParameter(element, "Color", request.Color, general);
         }
 
         var sync = await client.SyncExchangeDataAsync(identifier, model);
         ThrowIfFailed(sync, "sync the walls to the exchange");
 
-        return new WallsExchangeResult(request.Name, identifier.ExchangeId, identifier.CollectionId, identifier.HubId, created.Value.FileUrn);
+        // Read the latest revision back so the caller can see what was actually persisted.
+        var loaded = await client.GetElementDataModelAsync(identifier, loadLatest: true);
+        ThrowIfFailed(loaded, "read the exchange back");
+        var saved = loaded.Value.Elements
+            .Select(e => new SavedElement(e.Name, FlattenParameters(e.InstanceParameters)))
+            .ToList();
+        foreach (var element in saved)
+        {
+            _logger.LogInformation("Exchange {ExchangeId}: {Element} has {Count} instance parameters: {Parameters}",
+                identifier.ExchangeId, element.Name, element.Parameters.Count, string.Join(", ", element.Parameters.Keys));
+        }
+
+        return new WallsExchangeResult(request.Name, identifier.ExchangeId, identifier.CollectionId, identifier.HubId, created.Value.FileUrn, saved);
     }
 
     private Client GetClient(string userId, string accessToken)
@@ -116,13 +146,39 @@ public class DataExchangeService
         return entry.Client;
     }
 
-    private static async Task AddParameter(IElement element, string name, double value)
+    private static async Task AddParameter(IElement element, string name, ParameterDataType value, string groupId)
     {
-        await element.CreateInstanceParameterAsync(new Parameter(name, value)
+        var created = await element.CreateInstanceParameterAsync(new Parameter(name, value)
         {
             IsCustomParameter = true,
-            GroupID = Group.General.DisplayName(),
+            SampleText = string.Empty,
+            Description = string.Empty,
+            ReadOnly = false,
+            GroupID = groupId,
         });
+        if (created == null)
+        {
+            throw new InvalidOperationException($"Could not add parameter '{name}' to {element.Name}.");
+        }
+    }
+
+    // Instance parameters may be nested in ParameterSets.
+    private static Dictionary<string, string> FlattenParameters(IEnumerable<IParameter> parameters)
+    {
+        var result = new Dictionary<string, string>();
+        void Visit(IParameter parameter)
+        {
+            if (parameter is ParameterSet set)
+            {
+                foreach (var child in set.Parameters) Visit(child);
+            }
+            else
+            {
+                result[parameter.Name ?? parameter.SchemaId] = parameter.Value?.ToString() ?? string.Empty;
+            }
+        }
+        foreach (var parameter in parameters) Visit(parameter);
+        return result;
     }
 
     private static double WallLength(WallDto wall)
@@ -174,6 +230,16 @@ public class DataExchangeService
             mesh.Faces.Add(new Face { Corners = new List<int> { i, i + 2, i + 3 }, Normals = new List<Normal>(normals) });
         }
         return mesh;
+    }
+
+    private static (ushort R, ushort G, ushort B) ParseColor(string? hex)
+    {
+        var value = (hex ?? string.Empty).TrimStart('#');
+        if (value.Length != 6 || !int.TryParse(value, System.Globalization.NumberStyles.HexNumber, null, out var rgb))
+        {
+            rgb = 0xc8c8c8;
+        }
+        return ((ushort)((rgb >> 16) & 0xff), (ushort)((rgb >> 8) & 0xff), (ushort)(rgb & 0xff));
     }
 
     private static Unit ToUnit(string? units) => units?.ToLowerInvariant() switch

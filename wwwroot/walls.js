@@ -1,10 +1,11 @@
 // Wall drawing tool built on the APS Viewer Scene API
-// (https://aps.autodesk.com/blog/introducing-scene-api-aps-viewer).
+// (https://aps.autodesk.com/blog/introducing-scene-api-aps-viewer), with snapping as in
+// https://aps.autodesk.com/blog/snappy-viewer-tools (requires the Autodesk.Snapping extension to be loaded).
 // Namespaces are resolved once the viewer is initialized (see WallTool constructor).
 const av = Autodesk.Viewing;
 let avs, avm;
 
-const WALL_COLOR = 0xc8c8c8;
+const DEFAULT_WALL_COLOR = '#c8c8c8';
 const PREVIEW_COLOR = 0xff9900;
 const ESCAPE_KEY = 27;
 
@@ -53,6 +54,13 @@ function createWallGeometry(wall) {
     return geometry;
 }
 
+// Snap results that resolve to a single point; for edges and faces we use the point under the cursor.
+function isPointSnap(geomType) {
+    const SnapType = Autodesk.Viewing.MeasureCommon.SnapType;
+    return [SnapType.SNAP_VERTEX, SnapType.SNAP_MIDPOINT, SnapType.SNAP_INTERSECTION, SnapType.SNAP_CIRCLE_CENTER, SnapType.RASTER_PIXEL]
+        .includes(geomType);
+}
+
 export class WallTool {
     constructor(viewer) {
         avs = Autodesk.Viewing.Scene;
@@ -69,7 +77,10 @@ export class WallTool {
         this.previewId = -1;
         this.height = 10;
         this.thickness = 0.66;
+        this.color = DEFAULT_WALL_COLOR; // '#rrggbb', applied to every wall
         this.onChange = () => { };
+        this.snapper = new Autodesk.Viewing.Extensions.Snapping.Snapper(viewer, { renderSnappedGeometry: true, renderSnappedTopology: true });
+        viewer.toolController.registerTool(this.snapper);
         viewer.toolController.registerTool(this);
     }
 
@@ -81,9 +92,33 @@ export class WallTool {
         this.wallModel = new av.Model();
         this.viewer.showModel(this.wallModel, true); // keep the active navigation tools
         this.instances = this.wallModel.getInstances();
-        this.wallMaterial = new avs.StandardMaterial({ color: WALL_COLOR, specularColor: 0x222222, specularPower: 20, side: avs.Side.Double });
-        this.previewMaterial = new avs.StandardMaterial({ color: PREVIEW_COLOR, opacity: 0.5, specularColor: 0x222222, specularPower: 20, side: avs.Side.Double });
+        this.wallMaterial = this.createWallMaterial(this.color);
+        this.previewMaterial = new avs.StandardMaterial({
+            color: PREVIEW_COLOR, opacity: 0.5, transparent: true,
+            specularColor: 0x111111, specularPower: 20, fresnelStrength: 0, side: avs.Side.Double
+        });
         this.onChange();
+    }
+
+    // Walls are explicitly opaque; only the rubber-band preview is rendered in the transparent pass.
+    createWallMaterial(color) {
+        return new avs.StandardMaterial({
+            color: new avs.Color(color), opacity: 1, transparent: false, depthWrite: true, depthTest: true,
+            specularColor: 0x111111, specularPower: 20, fresnelStrength: 0, side: avs.Side.Double
+        });
+    }
+
+    // Assigns a new material to every wall (and to walls drawn from now on) via InstanceCollection3D.setMaterial.
+    setColor(color) {
+        this.color = color;
+        if (!this.instances) {
+            return;
+        }
+        this.wallMaterial = this.createWallMaterial(color);
+        for (const wall of this.walls) {
+            this.instances.setMaterial(wall.instanceId, this.wallMaterial);
+        }
+        this.viewer.refresh(true);
     }
 
     get isDrawing() {
@@ -92,6 +127,7 @@ export class WallTool {
 
     activateDrawing() {
         if (this.sourceModel && !this.isDrawing) {
+            this.viewer.toolController.activateTool(this.snapper.getName());
             this.viewer.toolController.activateTool(this.getName());
         }
     }
@@ -99,6 +135,7 @@ export class WallTool {
     deactivateDrawing() {
         if (this.isDrawing) {
             this.viewer.toolController.deactivateTool(this.getName());
+            this.viewer.toolController.deactivateTool(this.snapper.getName());
         }
     }
 
@@ -137,7 +174,7 @@ export class WallTool {
     getName() { return this.names[0]; }
     getPriority() { return 10; }
     activate() { this.onChange(); return true; }
-    deactivate() { this.endChain(); this.onChange(); return true; }
+    deactivate() { this.endChain(); this.snapper.indicator.clearOverlays(); this.onChange(); return true; }
     update() { return false; }
 
     handleSingleClick(event, button) {
@@ -145,38 +182,33 @@ export class WallTool {
             this.endChain();
             return true;
         }
-        const point = this.pick(event);
-        if (!point) {
-            return true;
-        }
-        if (!this.start) {
-            this.start = point;
-        } else {
-            const wall = this.makeWall(this.start, point);
-            if (wall) {
-                this.clearPreview();
-                wall.instanceId = this.instances.add(createWallGeometry(wall), this.wallMaterial, new avm.Matrix4());
-                this.walls.push(wall);
-                this.start = wall.end; // chain walls end to start
-                this.viewer.refresh(true);
-                this.onChange();
+        const point = this.snap(event);
+        if (point) {
+            if (!this.start) {
+                this.start = point;
+            } else {
+                const wall = this.makeWall(this.start, point);
+                if (wall) {
+                    wall.instanceId = this.instances.add(createWallGeometry(wall), this.wallMaterial, new avm.Matrix4());
+                    this.walls.push(wall);
+                    this.start = wall.end; // chain walls end to start
+                    this.onChange();
+                }
             }
         }
+        this.viewer.refresh(true);
         return true;
     }
 
     handleDoubleClick() { return true; }
 
     handleMouseMove(event) {
-        if (this.start) {
-            const point = this.pick(event);
-            const wall = point && this.makeWall(this.start, point);
-            this.clearPreview();
-            if (wall) {
-                this.previewId = this.instances.add(createWallGeometry(wall), this.previewMaterial, new avm.Matrix4());
-            }
-            this.viewer.refresh(true);
+        const point = this.snap(event);
+        const wall = this.start && point && this.makeWall(this.start, point);
+        if (wall) {
+            this.previewId = this.instances.add(createWallGeometry(wall), this.previewMaterial, new avm.Matrix4());
         }
+        this.viewer.refresh(true);
         return false; // let navigation tools see the event too
     }
 
@@ -199,10 +231,26 @@ export class WallTool {
         return { start, end, height: this.height, thickness: this.thickness };
     }
 
-    pick(event) {
-        // Only hit-test the loaded model so we never snap onto the walls we are drawing.
-        const hit = this.viewer.impl.hitTest(event.canvasX, event.canvasY, false, null, [this.sourceModel.getModelId()])
-            || this.viewer.clientToWorld(event.canvasX, event.canvasY, true);
+    /**
+     * Returns the snapped point under the cursor and draws the snap indicator.
+     * The preview wall is removed first: the snapper ray-casts against every visible model,
+     * so it would otherwise snap onto the preview itself.
+     */
+    snap(event) {
+        this.clearPreview();
+        const snapper = this.snapper;
+        snapper.indicator.clearOverlays();
+        snapper.onMouseMove({ x: event.canvasX, y: event.canvasY });
+        if (snapper.isSnapped()) {
+            const result = snapper.getSnapResult();
+            snapper.indicator.render();
+            const point = isPointSnap(result.geomType) ? result.geomVertex : result.intersectPoint;
+            if (point) {
+                return { x: point.x, y: point.y, z: point.z };
+            }
+        }
+        // Nothing to snap to: fall back to a plain hit test on the loaded model.
+        const hit = this.viewer.impl.hitTest(event.canvasX, event.canvasY, false, null, [this.sourceModel.getModelId()]);
         return hit?.point ? { x: hit.point.x, y: hit.point.y, z: hit.point.z } : null;
     }
 
@@ -223,11 +271,7 @@ export class WallTool {
         if (id === undefined || id < 0 || !this.instances) {
             return;
         }
-        if (typeof this.instances.remove === 'function') {
-            this.instances.remove(id);
-        } else {
-            this.instances.setVisibilityState(id, avs.VisibilityState.Hidden);
-        }
+        this.instances.remove(id);
         this.viewer.refresh(true);
     }
 }
